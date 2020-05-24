@@ -613,6 +613,12 @@ static struct thermal_zone_device_ops of_thermal_ops = {
 
 	.bind = of_thermal_bind,
 	.unbind = of_thermal_unbind,
+
+	.is_wakeable = of_thermal_is_wakeable,
+};
+
+static struct thermal_zone_of_device_ops of_virt_ops = {
+	.get_temp = virt_sensor_read_temp,
 };
 
 static struct thermal_zone_of_device_ops of_virt_ops = {

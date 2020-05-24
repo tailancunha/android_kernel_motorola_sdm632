@@ -83,6 +83,21 @@
 #define ARM_CPU_PART_CORTEX_A75		0x4100d0a0
 #define ARM_CPU_PART_KRYO2XX_GOLD	0x51008000
 #define ARM_CPU_PART_MASK		0xff00fff0
+#define ARM_CPU_PART_KRYO2XX_GOLD       0x51008000
+
+/* Broadcom cores */
+#define ARM_CPU_PART_BRAHMA_B15		0x420000f0
+
+/* DEC implemented cores */
+#define ARM_CPU_PART_SA1100		0x4400a110
+
+/* Intel implemented cores */
+#define ARM_CPU_PART_SA1110		0x6900b110
+#define ARM_CPU_REV_SA1110_A0		0
+#define ARM_CPU_REV_SA1110_B0		4
+#define ARM_CPU_REV_SA1110_B1		5
+#define ARM_CPU_REV_SA1110_B2		6
+#define ARM_CPU_REV_SA1110_B4		8
 
 /* Broadcom cores */
 #define ARM_CPU_PART_BRAHMA_B15		0x420000f0

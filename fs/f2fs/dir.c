@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/f2fs/dir.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
  *             http://www.samsung.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/fs.h>
 #include <linux/f2fs_fs.h>
@@ -60,7 +57,7 @@ static unsigned char f2fs_type_by_mode[S_IFMT >> S_SHIFT] = {
 	[S_IFLNK >> S_SHIFT]	= F2FS_FT_SYMLINK,
 };
 
-void set_de_type(struct f2fs_dir_entry *de, umode_t mode)
+static void set_de_type(struct f2fs_dir_entry *de, umode_t mode)
 {
 	de->file_type = f2fs_type_by_mode[(mode & S_IFMT) >> S_SHIFT];
 }
@@ -340,9 +337,9 @@ static int make_empty_dir(struct inode *inode,
 	struct f2fs_dentry_ptr d;
 
 	if (f2fs_has_inline_dentry(inode))
-		return make_empty_inline_dir(inode, parent, page);
+		return f2fs_make_empty_inline_dir(inode, parent, page);
 
-	dentry_page = get_new_data_page(inode, page, 0, true);
+	dentry_page = f2fs_get_new_data_page(inode, page, 0, true);
 	if (IS_ERR(dentry_page))
 		return PTR_ERR(dentry_page);
 
@@ -395,7 +392,7 @@ struct page *init_inode_metadata(struct inode *inode, struct inode *dir,
 				goto put_error;
 		}
 	} else {
-		page = get_node_page(F2FS_I_SB(dir), inode->i_ino);
+		page = f2fs_get_node_page(F2FS_I_SB(dir), inode->i_ino);
 		if (IS_ERR(page))
 			return page;
 	}
@@ -430,7 +427,7 @@ put_error:
 	return ERR_PTR(err);
 }
 
-void update_parent_metadata(struct inode *dir, struct inode *inode,
+void f2fs_update_parent_metadata(struct inode *dir, struct inode *inode,
 						unsigned int current_depth)
 {
 	if (inode && is_inode_flag_set(inode, FI_NEW_INODE)) {
@@ -448,7 +445,7 @@ void update_parent_metadata(struct inode *dir, struct inode *inode,
 		clear_inode_flag(inode, FI_INC_LINK);
 }
 
-int room_for_filename(const void *bitmap, int slots, int max_slots)
+int f2fs_room_for_filename(const void *bitmap, int slots, int max_slots)
 {
 	int bit_start = 0;
 	int zero_start, zero_end;
@@ -537,7 +534,7 @@ start:
 				(le32_to_cpu(dentry_hash) % nbucket));
 
 	for (block = bidx; block <= (bidx + nblock - 1); block++) {
-		dentry_page = get_new_data_page(dir, NULL, block, true);
+		dentry_page = f2fs_get_new_data_page(dir, NULL, block, true);
 		if (IS_ERR(dentry_page))
 			return PTR_ERR(dentry_page);
 
@@ -576,7 +573,7 @@ add_dentry:
 		f2fs_put_page(page, 1);
 	}
 
-	update_parent_metadata(dir, inode, current_depth);
+	f2fs_update_parent_metadata(dir, inode, current_depth);
 fail:
 	if (inode)
 		up_write(&F2FS_I(inode)->i_sem);
@@ -685,7 +682,7 @@ void f2fs_drop_nlink(struct inode *dir, struct inode *inode)
 	if (inode->i_nlink == 0)
 		add_orphan_inode(inode);
 	else
-		release_orphan_inode(sbi);
+		f2fs_release_orphan_inode(sbi);
 }
 
 /*
@@ -738,8 +735,9 @@ void f2fs_delete_entry(struct f2fs_dir_entry *dentry, struct page *page,
 		spin_unlock_irqrestore(&mapping->tree_lock, flags);
 
 		clear_page_dirty_for_io(page);
-		ClearPagePrivate(page);
+		f2fs_clear_page_private(page);
 		ClearPageUptodate(page);
+		clear_cold_data(page);
 		inode_dec_dirty_pages(dir);
 		remove_dirty_inode(dir);
 	}
@@ -794,6 +792,9 @@ int f2fs_fill_dentries(struct dir_context *ctx, struct f2fs_dentry_ptr *d,
 
 	bit_pos = ((unsigned long)ctx->pos % d->max);
 
+	if (readdir_ra)
+		blk_start_plug(&plug);
+
 	while (bit_pos < d->max) {
 		bit_pos = find_next_bit_le(d->bitmap, d->max, bit_pos);
 		if (bit_pos >= d->max)
@@ -832,7 +833,39 @@ int f2fs_fill_dentries(struct dir_context *ctx, struct f2fs_dentry_ptr *d,
 		if (sbi->readdir_ra == 1)
 			ra_node_page(sbi, le32_to_cpu(de->ino));
 
+		/* check memory boundary before moving forward */
 		bit_pos += GET_DENTRY_SLOTS(le16_to_cpu(de->name_len));
+		if (unlikely(bit_pos > d->max ||
+				le16_to_cpu(de->name_len) > F2FS_NAME_LEN)) {
+			f2fs_warn(sbi, "%s: corrupted namelen=%d, run fsck to fix.",
+				  __func__, le16_to_cpu(de->name_len));
+			set_sbi_flag(sbi, SBI_NEED_FSCK);
+			err = -EFSCORRUPTED;
+			goto out;
+		}
+
+		if (IS_ENCRYPTED(d->inode)) {
+			int save_len = fstr->len;
+
+			err = fscrypt_fname_disk_to_usr(d->inode,
+						(u32)le32_to_cpu(de->hash_code),
+						0, &de_name, fstr);
+			if (err)
+				goto out;
+
+			de_name = *fstr;
+			fstr->len = save_len;
+		}
+
+		if (!dir_emit(ctx, de_name.name, de_name.len,
+					le32_to_cpu(de->ino), d_type)) {
+			err = 1;
+			goto out;
+		}
+
+		if (readdir_ra)
+			f2fs_ra_node_page(sbi, le32_to_cpu(de->ino));
+
 		ctx->pos = start_pos + bit_pos;
 	}
 	return 0;

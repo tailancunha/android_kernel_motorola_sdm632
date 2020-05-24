@@ -28,6 +28,8 @@
 #include <linux/micrel_phy.h>
 #include <linux/of.h>
 #include <linux/clk.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 /* Operation Mode Strap Override */
 #define MII_KSZPHY_OMSO				0x16
@@ -472,6 +474,37 @@ static int ksz9031_extended_read(struct phy_device *phydev,
 	return phy_read(phydev, MII_KSZ9031RN_MMD_REGDATA_REG);
 }
 
+static int ksz9031_ack_interrupt(struct phy_device *phydev)
+{
+	/* bit[7..0] int status, which is a read and clear register. */
+	int rc;
+	u32 reg_value;
+
+	rc = phy_read(phydev, MII_KSZPHY_INTCS);
+
+	reg_value = ksz9031_extended_read(
+	   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+	if (reg_value & MII_KSZPHY_WOL_CTRL_PME_N2) {
+		/* PME output is cleared by disabling the PME trigger src */
+		reg_value = ksz9031_extended_read(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+		reg_value &= ~(MII_KSZPHY_WOL_MAGIC_PKT |
+					   MII_KSZPHY_WOL_LINK_UP |
+					   MII_KSZPHY_WOL_LINK_DOWN);
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG, reg_value);
+		reg_value = ksz9031_extended_read(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+		reg_value |= (MII_KSZPHY_WOL_MAGIC_PKT |
+					  MII_KSZPHY_WOL_LINK_UP |
+					  MII_KSZPHY_WOL_LINK_DOWN);
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG, reg_value);
+	}
+
+	return (rc < 0) ? rc : 0;
+}
+
 static int ksz9031_of_load_skew_values(struct phy_device *phydev,
 				       const struct device_node *of_node,
 				       u16 reg, size_t field_sz,
@@ -794,6 +827,130 @@ static int kszphy_probe(struct phy_device *phydev)
 	if (phydev->dev_flags & MICREL_PHY_50MHZ_CLK) {
 		priv->rmii_ref_clk_sel = true;
 		priv->rmii_ref_clk_sel_val = true;
+	}
+
+	return 0;
+}
+
+static void ksz9031_set_wol_settings(
+	struct phy_device *phydev, bool is_wol_enabled)
+{
+	u32 reg_value;
+	u32 reg_value1;
+
+	reg_value = ksz9031_extended_read(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+	if (is_wol_enabled) {
+		/* Enable both PHY and PME_N2 interrupts */
+		reg_value |= MII_KSZPHY_WOL_CTRL_PME_N2;
+		reg_value &= ~MII_KSZPHY_WOL_CTRL_INT_N;
+		reg_value |= (MII_KSZPHY_WOL_MAGIC_PKT |
+					  MII_KSZPHY_WOL_LINK_UP |
+					  MII_KSZPHY_WOL_LINK_DOWN);
+		/* Enable PME_N2 output */
+		reg_value1 = ksz9031_extended_read(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_OMSO_REG);
+		reg_value1 |= MII_KSZPHY_OMSO_PME_N2;
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, MII_KSZPHY_OMSO_REG, reg_value1);
+	} else {
+		/* Disable PME_N2 output and enable only PHY interrupt */
+		reg_value &= ~MII_KSZPHY_WOL_CTRL_PME_N2;
+		reg_value |= MII_KSZPHY_WOL_CTRL_INT_N;
+		reg_value &= ~(MII_KSZPHY_WOL_MAGIC_PKT |
+					   MII_KSZPHY_WOL_LINK_UP |
+					   MII_KSZPHY_WOL_LINK_DOWN);
+	}
+	ksz9031_extended_write(
+	   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG, reg_value);
+}
+
+static int ksz9031_set_wol(
+	struct phy_device *phydev, struct ethtool_wolinfo *wol)
+{
+	struct net_device *ndev = phydev->attached_dev;
+	const u8 *mac;
+	int ret = 0;
+	bool is_wol_enabled = false;
+
+	if (!ndev)
+		return -ENODEV;
+
+	if (wol->wolopts & WAKE_MAGIC) {
+		mac = (const u8 *)ndev->dev_addr;
+
+		if (!is_valid_ether_addr(mac))
+			return -EINVAL;
+
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, 0x11, mac[5] | (mac[4] << 8));
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, 0x12, mac[3] | (mac[2] << 8));
+		ksz9031_extended_write(
+		   phydev, OP_DATA, 0x2, 0x13, mac[1] | (mac[0] << 8));
+
+		/* Enable WOL interrupt for magic pkt, link up and down */
+		is_wol_enabled = true;
+	}
+	ksz9031_set_wol_settings(phydev, is_wol_enabled);
+
+	return ret;
+}
+
+static void ksz9031_get_wol(
+	struct phy_device *phydev, struct ethtool_wolinfo *wol)
+{
+	u32 reg_value;
+
+	wol->supported = WAKE_MAGIC;
+	wol->wolopts = 0;
+
+	reg_value = ksz9031_extended_read(
+	   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+	if (reg_value & MII_KSZPHY_WOL_CTRL_PME_N2)
+		wol->wolopts |= WAKE_MAGIC;
+}
+
+static int ksz9031_suspend(struct phy_device *phydev)
+{
+	int value;
+	int wol_enabled;
+	u32 reg_value;
+
+	mutex_lock(&phydev->lock);
+
+	reg_value = ksz9031_extended_read(
+	   phydev, OP_DATA, 0x2, MII_KSZPHY_WOL_CTRL_REG);
+	wol_enabled = reg_value & MII_KSZPHY_WOL_CTRL_PME_N2;
+
+	value = phy_read(phydev, MII_BMCR);
+	if (wol_enabled)
+		value |= BMCR_ISOLATE;
+	else
+		value |= BMCR_PDOWN;
+
+	phy_write(phydev, MII_BMCR, value);
+	mutex_unlock(&phydev->lock);
+
+	return 0;
+}
+
+static int ksz9031_resume(struct phy_device *phydev)
+{
+	int value;
+
+	mutex_lock(&phydev->lock);
+
+	value = phy_read(phydev, MII_BMCR);
+	value &= ~(BMCR_PDOWN | BMCR_ISOLATE);
+	phy_write(phydev, MII_BMCR, value);
+
+	mutex_unlock(&phydev->lock);
+
+	if (phy_interrupt_is_valid(phydev) || phydev->interrupts ==
+		PHY_INTERRUPT_ENABLED) {
+		if (phydev->drv->config_intr)
+			phydev->drv->config_intr(phydev);
 	}
 
 	return 0;

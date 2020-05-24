@@ -2145,41 +2145,34 @@ static void wil_wiphy_init(struct wiphy *wiphy)
 
 struct wireless_dev *wil_cfg80211_init(struct device *dev)
 {
-	int rc = 0;
-	struct wireless_dev *wdev;
+	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
+	int rc;
 
-	dev_dbg(dev, "%s()\n", __func__);
+	/* Setting the wakeup trigger based on wow is TBD */
 
-	wdev = kzalloc(sizeof(*wdev), GFP_KERNEL);
-	if (!wdev)
-		return ERR_PTR(-ENOMEM);
-
-	wdev->wiphy = wiphy_new(&wil_cfg80211_ops,
-				sizeof(struct wil6210_priv));
-	if (!wdev->wiphy) {
-		rc = -ENOMEM;
-		goto out;
+	if (test_bit(wil_status_suspended, wil->status)) {
+		wil_dbg_pm(wil, "trying to suspend while suspended\n");
+		return 0;
 	}
 
-	set_wiphy_dev(wdev->wiphy, dev);
-	wil_wiphy_init(wdev->wiphy);
+	rc = wil_can_suspend(wil, false);
+	if (rc)
+		goto out;
 
 	return wdev;
 
 out:
-	kfree(wdev);
-
-	return ERR_PTR(rc);
+	return rc;
 }
 
-void wil_wdev_free(struct wil6210_priv *wil)
+static int wil_cfg80211_resume(struct wiphy *wiphy)
 {
-	struct wireless_dev *wdev = wil_to_wdev(wil);
+	struct wil6210_priv *wil = wiphy_to_wil(wiphy);
 
-	dev_dbg(wil_to_dev(wil), "%s()\n", __func__);
+	wil_dbg_pm(wil, "resuming\n");
 
-	if (!wdev)
-		return;
+	return 0;
+}
 
 	wiphy_free(wdev->wiphy);
 	kfree(wdev);

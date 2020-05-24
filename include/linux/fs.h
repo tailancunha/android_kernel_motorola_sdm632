@@ -1387,6 +1387,9 @@ struct super_block {
 	void                    *s_security;
 #endif
 	const struct xattr_handler **s_xattr;
+#ifdef CONFIG_FS_ENCRYPTION
+	const struct fscrypt_operations	*s_cop;
+#endif
 
 	const struct fscrypt_operations	*s_cop;
 

@@ -125,6 +125,7 @@ u32		audit_sig_sid = 0;
 static atomic_t    audit_lost = ATOMIC_INIT(0);
 
 /* The netlink socket. */
+static DEFINE_MUTEX(audit_sock_mutex);
 static struct sock *audit_sock;
 static int audit_net_id;
 
@@ -411,7 +412,9 @@ static void kauditd_send_skb(struct sk_buff *skb)
 restart:
 	/* take a reference in case we can't send it and we want to hold it */
 	skb_get(skb);
+	mutex_lock(&audit_sock_mutex);
 	err = netlink_unicast(audit_sock, skb, audit_nlk_portid, 0);
+	mutex_unlock(&audit_sock_mutex);
 	if (err < 0) {
 		pr_err("netlink_unicast sending to audit_pid=%d returned error: %d\n",
 		       audit_pid, err);
@@ -901,7 +904,9 @@ static int audit_receive_msg(struct sk_buff *skb, struct nlmsghdr *nlh)
 				audit_log_config_change("audit_pid", new_pid, audit_pid, 1);
 			audit_pid = new_pid;
 			audit_nlk_portid = NETLINK_CB(skb).portid;
+			mutex_lock(&audit_sock_mutex);
 			audit_sock = skb->sk;
+			mutex_unlock(&audit_sock_mutex);
 		}
 		if (s.mask & AUDIT_STATUS_RATE_LIMIT) {
 			err = audit_set_rate_limit(s.rate_limit);
@@ -1169,10 +1174,12 @@ static void __net_exit audit_net_exit(struct net *net)
 {
 	struct audit_net *aunet = net_generic(net, audit_net_id);
 	struct sock *sock = aunet->nlsk;
+	mutex_lock(&audit_sock_mutex);
 	if (sock == audit_sock) {
 		audit_pid = 0;
 		audit_sock = NULL;
 	}
+	mutex_unlock(&audit_sock_mutex);
 
 	RCU_INIT_POINTER(aunet->nlsk, NULL);
 	synchronize_net();

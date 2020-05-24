@@ -803,6 +803,17 @@ static inline void cfqg_stats_update_completion(struct cfq_group *cfqg,
 
 #endif	/* CONFIG_CFQ_GROUP_IOSCHED */
 
+static inline u64 get_group_idle(struct cfq_data *cfqd)
+{
+#ifdef CONFIG_CFQ_GROUP_IOSCHED
+	struct cfq_queue *cfqq = cfqd->active_queue;
+
+	if (cfqq && cfqq->cfqg)
+		return cfqq->cfqg->group_idle;
+#endif
+	return cfqd->cfq_group_idle;
+}
+
 #define cfq_log(cfqd, fmt, args...)	\
 	blk_add_trace_msg((cfqd)->queue, "cfq " fmt, ##args)
 
@@ -823,7 +834,7 @@ static inline bool cfq_io_thinktime_big(struct cfq_data *cfqd,
 	if (!sample_valid(ttime->ttime_samples))
 		return false;
 	if (group_idle)
-		slice = cfqd->cfq_group_idle;
+		slice = get_group_idle(cfqd);
 	else
 		slice = cfqd->cfq_slice_idle;
 	return ttime->ttime_mean > slice;
@@ -2057,6 +2068,11 @@ static struct cftype cfq_blkcg_legacy_files[] = {
 		.seq_show = cfq_print_leaf_weight,
 		.write_u64 = cfq_set_leaf_weight,
 	},
+	{
+		.name = "group_idle",
+		.seq_show = cfq_print_group_idle,
+		.write_u64 = cfq_set_group_idle,
+	},
 
 	/* statistics, covers only the tasks in the cfqg */
 	{
@@ -2963,9 +2979,8 @@ static void cfq_arm_slice_timer(struct cfq_data *cfqd)
 	 */
 	if (!cfq_should_idle(cfqd, cfqq)) {
 		/* no queue idling. Check for group idling */
-		if (cfqd->cfq_group_idle)
-			group_idle = cfqd->cfq_group_idle;
-		else
+		group_idle = get_group_idle(cfqd);
+		if (!group_idle)
 			return;
 	}
 
@@ -3006,7 +3021,7 @@ static void cfq_arm_slice_timer(struct cfq_data *cfqd)
 	cfq_mark_cfqq_wait_request(cfqq);
 
 	if (group_idle)
-		sl = cfqd->cfq_group_idle;
+		sl = group_idle;
 	else
 		sl = cfqd->cfq_slice_idle;
 
@@ -3355,7 +3370,7 @@ static struct cfq_queue *cfq_select_queue(struct cfq_data *cfqd)
 	 * this group, wait for requests to complete.
 	 */
 check_group_idle:
-	if (cfqd->cfq_group_idle && cfqq->cfqg->nr_cfqq == 1 &&
+	if (get_group_idle(cfqd) && cfqq->cfqg->nr_cfqq == 1 &&
 	    cfqq->cfqg->dispatched &&
 	    !cfq_io_thinktime_big(cfqd, &cfqq->cfqg->ttime, true)) {
 		cfqq = NULL;
@@ -3914,7 +3929,7 @@ cfq_update_io_thinktime(struct cfq_data *cfqd, struct cfq_queue *cfqq,
 			cfqd->cfq_slice_idle);
 	}
 #ifdef CONFIG_CFQ_GROUP_IOSCHED
-	__cfq_update_io_thinktime(&cfqq->cfqg->ttime, cfqd->cfq_group_idle);
+	__cfq_update_io_thinktime(&cfqq->cfqg->ttime, get_group_idle(cfqd));
 #endif
 }
 

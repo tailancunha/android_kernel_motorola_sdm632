@@ -216,6 +216,19 @@ __acquires(&sta->tid_rx_lock) __releases(&sta->tid_rx_lock)
 	}
 	/* statistics */
 	memset(&sta->stats, 0, sizeof(sta->stats));
+	sta->stats.tx_latency_min_us = U32_MAX;
+}
+
+static bool wil_is_connected(struct wil6210_priv *wil)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(wil->sta); i++) {
+		if (wil->sta[i].status == wil_sta_connected)
+			return true;
+	}
+
+	return false;
 }
 
 static bool wil_is_connected(struct wil6210_priv *wil)
@@ -1321,7 +1334,6 @@ int wil_reset(struct wil6210_priv *wil, bool load_fw)
 	clear_bit(wil_status_resetting, wil->status);
 
 	if (load_fw) {
-		wil_configure_interrupt_moderation(wil);
 		wil_unmask_irq(wil);
 
 		/* we just started MAC, wait for FW ready */

@@ -509,6 +509,7 @@ memory_probe_store(struct device *dev, struct device_attribute *attr,
 
 	ret = count;
 out:
+	unlock_device_hotplug();
 	return ret;
 }
 

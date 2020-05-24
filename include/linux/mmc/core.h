@@ -249,6 +249,17 @@ extern int mmc_recovery_fallback_lower_speed(struct mmc_host *host);
 extern void mmc_cmdq_up_rwsem(struct mmc_host *host);
 extern int mmc_cmdq_down_rwsem(struct mmc_host *host, struct request *rq);
 
+extern void mmc_blk_init_bkops_statistics(struct mmc_card *card);
+
+extern void mmc_deferred_scaling(struct mmc_host *host, unsigned long timeout);
+extern void mmc_cmdq_clk_scaling_start_busy(struct mmc_host *host,
+	bool lock_needed);
+extern void mmc_cmdq_clk_scaling_stop_busy(struct mmc_host *host,
+	bool lock_needed, bool is_cmdq_dcmd);
+extern int mmc_recovery_fallback_lower_speed(struct mmc_host *host);
+extern void mmc_cmdq_up_rwsem(struct mmc_host *host);
+extern int mmc_cmdq_down_rwsem(struct mmc_host *host, struct request *rq);
+
 /**
  *	mmc_claim_host - exclusively claim a host
  *	@host: mmc host to claim

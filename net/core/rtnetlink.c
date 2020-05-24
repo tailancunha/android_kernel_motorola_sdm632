@@ -1281,6 +1281,174 @@ err_cancel:
 	return err;
 }
 
+static noinline_for_stack int rtnl_fill_vfinfo(struct sk_buff *skb,
+					       struct net_device *dev,
+					       int vfs_num,
+					       struct nlattr *vfinfo)
+{
+	struct ifla_vf_rss_query_en vf_rss_query_en;
+	struct nlattr *vf, *vfstats, *vfvlanlist;
+	struct ifla_vf_link_state vf_linkstate;
+	struct ifla_vf_vlan_info vf_vlan_info;
+	struct ifla_vf_spoofchk vf_spoofchk;
+	struct ifla_vf_tx_rate vf_tx_rate;
+	struct ifla_vf_stats vf_stats;
+	struct ifla_vf_trust vf_trust;
+	struct ifla_vf_vlan vf_vlan;
+	struct ifla_vf_rate vf_rate;
+	struct ifla_vf_mac vf_mac;
+	struct ifla_vf_info ivi;
+
+	memset(&ivi, 0, sizeof(ivi));
+
+	/* Not all SR-IOV capable drivers support the
+	 * spoofcheck and "RSS query enable" query.  Preset to
+	 * -1 so the user space tool can detect that the driver
+	 * didn't report anything.
+	 */
+	ivi.spoofchk = -1;
+	ivi.rss_query_en = -1;
+	ivi.trusted = -1;
+	/* The default value for VF link state is "auto"
+	 * IFLA_VF_LINK_STATE_AUTO which equals zero
+	 */
+	ivi.linkstate = 0;
+	/* VLAN Protocol by default is 802.1Q */
+	ivi.vlan_proto = htons(ETH_P_8021Q);
+	if (dev->netdev_ops->ndo_get_vf_config(dev, vfs_num, &ivi))
+		return 0;
+
+	memset(&vf_vlan_info, 0, sizeof(vf_vlan_info));
+
+	vf_mac.vf =
+		vf_vlan.vf =
+		vf_vlan_info.vf =
+		vf_rate.vf =
+		vf_tx_rate.vf =
+		vf_spoofchk.vf =
+		vf_linkstate.vf =
+		vf_rss_query_en.vf =
+		vf_trust.vf = ivi.vf;
+
+	memcpy(vf_mac.mac, ivi.mac, sizeof(ivi.mac));
+	vf_vlan.vlan = ivi.vlan;
+	vf_vlan.qos = ivi.qos;
+	vf_vlan_info.vlan = ivi.vlan;
+	vf_vlan_info.qos = ivi.qos;
+	vf_vlan_info.vlan_proto = ivi.vlan_proto;
+	vf_tx_rate.rate = ivi.max_tx_rate;
+	vf_rate.min_tx_rate = ivi.min_tx_rate;
+	vf_rate.max_tx_rate = ivi.max_tx_rate;
+	vf_spoofchk.setting = ivi.spoofchk;
+	vf_linkstate.link_state = ivi.linkstate;
+	vf_rss_query_en.setting = ivi.rss_query_en;
+	vf_trust.setting = ivi.trusted;
+	vf = nla_nest_start(skb, IFLA_VF_INFO);
+	if (!vf)
+		goto nla_put_vfinfo_failure;
+	if (nla_put(skb, IFLA_VF_MAC, sizeof(vf_mac), &vf_mac) ||
+	    nla_put(skb, IFLA_VF_VLAN, sizeof(vf_vlan), &vf_vlan) ||
+	    nla_put(skb, IFLA_VF_RATE, sizeof(vf_rate),
+		    &vf_rate) ||
+	    nla_put(skb, IFLA_VF_TX_RATE, sizeof(vf_tx_rate),
+		    &vf_tx_rate) ||
+	    nla_put(skb, IFLA_VF_SPOOFCHK, sizeof(vf_spoofchk),
+		    &vf_spoofchk) ||
+	    nla_put(skb, IFLA_VF_LINK_STATE, sizeof(vf_linkstate),
+		    &vf_linkstate) ||
+	    nla_put(skb, IFLA_VF_RSS_QUERY_EN,
+		    sizeof(vf_rss_query_en),
+		    &vf_rss_query_en) ||
+	    nla_put(skb, IFLA_VF_TRUST,
+		    sizeof(vf_trust), &vf_trust))
+		goto nla_put_vf_failure;
+	vfvlanlist = nla_nest_start(skb, IFLA_VF_VLAN_LIST);
+	if (!vfvlanlist)
+		goto nla_put_vf_failure;
+	if (nla_put(skb, IFLA_VF_VLAN_INFO, sizeof(vf_vlan_info),
+		    &vf_vlan_info)) {
+		nla_nest_cancel(skb, vfvlanlist);
+		goto nla_put_vf_failure;
+	}
+	nla_nest_end(skb, vfvlanlist);
+	memset(&vf_stats, 0, sizeof(vf_stats));
+	if (dev->netdev_ops->ndo_get_vf_stats)
+		dev->netdev_ops->ndo_get_vf_stats(dev, vfs_num,
+						&vf_stats);
+	vfstats = nla_nest_start(skb, IFLA_VF_STATS);
+	if (!vfstats)
+		goto nla_put_vf_failure;
+	if (nla_put_u64_64bit(skb, IFLA_VF_STATS_RX_PACKETS,
+			      vf_stats.rx_packets, IFLA_VF_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, IFLA_VF_STATS_TX_PACKETS,
+			      vf_stats.tx_packets, IFLA_VF_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, IFLA_VF_STATS_RX_BYTES,
+			      vf_stats.rx_bytes, IFLA_VF_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, IFLA_VF_STATS_TX_BYTES,
+			      vf_stats.tx_bytes, IFLA_VF_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, IFLA_VF_STATS_BROADCAST,
+			      vf_stats.broadcast, IFLA_VF_STATS_PAD) ||
+	    nla_put_u64_64bit(skb, IFLA_VF_STATS_MULTICAST,
+			      vf_stats.multicast, IFLA_VF_STATS_PAD)) {
+		nla_nest_cancel(skb, vfstats);
+		goto nla_put_vf_failure;
+	}
+	nla_nest_end(skb, vfstats);
+	nla_nest_end(skb, vf);
+	return 0;
+
+nla_put_vf_failure:
+	nla_nest_cancel(skb, vf);
+nla_put_vfinfo_failure:
+	nla_nest_cancel(skb, vfinfo);
+	return -EMSGSIZE;
+}
+
+static int rtnl_fill_link_ifmap(struct sk_buff *skb, struct net_device *dev)
+{
+	struct rtnl_link_ifmap map;
+
+	memset(&map, 0, sizeof(map));
+	map.mem_start   = dev->mem_start;
+	map.mem_end     = dev->mem_end;
+	map.base_addr   = dev->base_addr;
+	map.irq         = dev->irq;
+	map.dma         = dev->dma;
+	map.port        = dev->if_port;
+
+	if (nla_put_64bit(skb, IFLA_MAP, sizeof(map), &map, IFLA_PAD))
+		return -EMSGSIZE;
+
+	return 0;
+}
+
+static int rtnl_xdp_fill(struct sk_buff *skb, struct net_device *dev)
+{
+	struct netdev_xdp xdp_op = {};
+	struct nlattr *xdp;
+	int err;
+
+	if (!dev->netdev_ops->ndo_xdp)
+		return 0;
+	xdp = nla_nest_start(skb, IFLA_XDP);
+	if (!xdp)
+		return -EMSGSIZE;
+	xdp_op.command = XDP_QUERY_PROG;
+	err = dev->netdev_ops->ndo_xdp(dev, &xdp_op);
+	if (err)
+		goto err_cancel;
+	err = nla_put_u8(skb, IFLA_XDP_ATTACHED, xdp_op.prog_attached);
+	if (err)
+		goto err_cancel;
+
+	nla_nest_end(skb, xdp);
+	return 0;
+
+err_cancel:
+	nla_nest_cancel(skb, xdp);
+	return err;
+}
+
 static int rtnl_fill_ifinfo(struct sk_buff *skb, struct net_device *dev,
 			    int type, u32 pid, u32 seq, u32 change,
 			    unsigned int flags, u32 ext_filter_mask)
@@ -2278,6 +2446,22 @@ static int rtnl_group_dellink(const struct net *net, int group)
 
 	return 0;
 }
+
+int rtnl_delete_link(struct net_device *dev)
+{
+	const struct rtnl_link_ops *ops;
+	LIST_HEAD(list_kill);
+
+	ops = dev->rtnl_link_ops;
+	if (!ops || !ops->dellink)
+		return -EOPNOTSUPP;
+
+	ops->dellink(dev, &list_kill);
+	unregister_netdevice_many(&list_kill);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(rtnl_delete_link);
 
 int rtnl_delete_link(struct net_device *dev)
 {

@@ -361,13 +361,30 @@ static void cgroup_idr_remove(struct idr *idr, int id)
 	spin_unlock_bh(&cgroup_idr_lock);
 }
 
-static struct cgroup *cgroup_parent(struct cgroup *cgrp)
+/* subsystems visibly enabled on a cgroup */
+static u16 cgroup_control(struct cgroup *cgrp)
 {
-	struct cgroup_subsys_state *parent_css = cgrp->self.parent;
+	struct cgroup *parent = cgroup_parent(cgrp);
+	u16 root_ss_mask = cgrp->root->subsys_mask;
 
-	if (parent_css)
-		return container_of(parent_css, struct cgroup, self);
-	return NULL;
+	if (parent)
+		return parent->subtree_control;
+
+	if (cgroup_on_dfl(cgrp))
+		root_ss_mask &= ~(cgrp_dfl_inhibit_ss_mask |
+				  cgrp_dfl_implicit_ss_mask);
+	return root_ss_mask;
+}
+
+/* subsystems enabled on a cgroup */
+static u16 cgroup_ss_mask(struct cgroup *cgrp)
+{
+	struct cgroup *parent = cgroup_parent(cgrp);
+
+	if (parent)
+		return parent->subtree_ss_mask;
+
+	return cgrp->root->subsys_mask;
 }
 
 /* subsystems visibly enabled on a cgroup */
@@ -3525,6 +3542,14 @@ static int cgroup_events_show(struct seq_file *seq, void *v)
 	return 0;
 }
 
+static void cgroup_file_release(struct kernfs_open_file *of)
+{
+	struct cftype *cft = of->kn->priv;
+
+	if (cft->release)
+		cft->release(of);
+}
+
 static ssize_t cgroup_file_write(struct kernfs_open_file *of, char *buf,
 				 size_t nbytes, loff_t off)
 {
@@ -3563,6 +3588,16 @@ static ssize_t cgroup_file_write(struct kernfs_open_file *of, char *buf,
 	return ret ?: nbytes;
 }
 
+static unsigned int cgroup_file_poll(struct kernfs_open_file *of, poll_table *pt)
+{
+	struct cftype *cft = of->kn->priv;
+
+	if (cft->poll)
+		return cft->poll(of, pt);
+
+	return kernfs_generic_poll(of, pt);
+}
+
 static void *cgroup_seqfile_start(struct seq_file *seq, loff_t *ppos)
 {
 	return seq_cft(seq)->seq_start(seq, ppos);
@@ -3575,7 +3610,8 @@ static void *cgroup_seqfile_next(struct seq_file *seq, void *v, loff_t *ppos)
 
 static void cgroup_seqfile_stop(struct seq_file *seq, void *v)
 {
-	seq_cft(seq)->seq_stop(seq, v);
+	if (seq_cft(seq)->seq_stop)
+		seq_cft(seq)->seq_stop(seq, v);
 }
 
 static int cgroup_seqfile_show(struct seq_file *m, void *arg)
@@ -3597,13 +3633,19 @@ static int cgroup_seqfile_show(struct seq_file *m, void *arg)
 
 static struct kernfs_ops cgroup_kf_single_ops = {
 	.atomic_write_len	= PAGE_SIZE,
+	.open			= cgroup_file_open,
+	.release		= cgroup_file_release,
 	.write			= cgroup_file_write,
+	.poll			= cgroup_file_poll,
 	.seq_show		= cgroup_seqfile_show,
 };
 
 static struct kernfs_ops cgroup_kf_ops = {
 	.atomic_write_len	= PAGE_SIZE,
+	.open			= cgroup_file_open,
+	.release		= cgroup_file_release,
 	.write			= cgroup_file_write,
+	.poll			= cgroup_file_poll,
 	.seq_start		= cgroup_seqfile_start,
 	.seq_next		= cgroup_seqfile_next,
 	.seq_stop		= cgroup_seqfile_stop,
@@ -4940,6 +4982,7 @@ static struct cftype cgroup_dfl_base_files[] = {
 		.file_offset = offsetof(struct cgroup, events_file),
 		.seq_show = cgroup_events_show,
 	},
+#endif /* CONFIG_PSI */
 	{ }	/* terminate */
 };
 
@@ -5045,6 +5088,8 @@ static void css_free_work_fn(struct work_struct *work)
 			 */
 			cgroup_put(cgroup_parent(cgrp));
 			kernfs_put(cgrp->kn);
+			if (cgroup_on_dfl(cgrp))
+				psi_cgroup_free(cgrp);
 			kfree(cgrp);
 		} else {
 			/*
@@ -5380,8 +5425,9 @@ static int cgroup_mkdir(struct kernfs_node *parent_kn, const char *name,
 	/* let's create and online css's */
 	kernfs_activate(kn);
 
-	ret = 0;
-	goto out_unlock;
+	cgroup_propagate_control(cgrp);
+
+	return cgrp;
 
 out_destroy:
 	cgroup_destroy_locked(cgrp);

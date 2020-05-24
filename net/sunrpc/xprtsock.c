@@ -1737,7 +1737,7 @@ static void xs_udp_timer(struct rpc_xprt *xprt, struct rpc_task *task)
 	xprt_adjust_cwnd(xprt, task, -ETIMEDOUT);
 }
 
-static unsigned short xs_get_random_port(void)
+static int xs_get_random_port(void)
 {
 	unsigned short range = xprt_max_resvport - xprt_min_resvport + 1;
 	unsigned short rand = (unsigned short) prandom_u32() % range;
@@ -1798,9 +1798,9 @@ static void xs_set_srcport(struct sock_xprt *transport, struct socket *sock)
 		transport->srcport = xs_sock_getport(sock);
 }
 
-static unsigned short xs_get_srcport(struct sock_xprt *transport)
+static int xs_get_srcport(struct sock_xprt *transport)
 {
-	unsigned short port = transport->srcport;
+	int port = transport->srcport;
 
 	if (port == 0 && transport->xprt.resvport)
 		port = xs_get_random_port();
@@ -1821,7 +1821,7 @@ static int xs_bind(struct sock_xprt *transport, struct socket *sock)
 {
 	struct sockaddr_storage myaddr;
 	int err, nloop = 0;
-	unsigned short port = xs_get_srcport(transport);
+	int port = xs_get_srcport(transport);
 	unsigned short last;
 
 	/*
@@ -1839,8 +1839,8 @@ static int xs_bind(struct sock_xprt *transport, struct socket *sock)
 	 * transport->xprt.resvport == 1) xs_get_srcport above will
 	 * ensure that port is non-zero and we will bind as needed.
 	 */
-	if (port == 0)
-		return 0;
+	if (port <= 0)
+		return port;
 
 	memcpy(&myaddr, &transport->srcaddr, transport->xprt.addrlen);
 	do {

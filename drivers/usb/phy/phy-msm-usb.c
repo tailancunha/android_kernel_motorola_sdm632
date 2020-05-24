@@ -2310,13 +2310,25 @@ static int msm_otg_set_peripheral(struct usb_otg *otg,
 			otg->state, motg->pdata->mode);
 
 	/*
-	 * Kick the state machine work, if host is not supported
-	 * or host is already registered with us.
+	 * clear the pending/outstanding interrupts and
+	 * read the ID status from the SRC_STATUS register.
 	 */
 	if (motg->pdata->mode == USB_PERIPHERAL || otg->host)
 		queue_work(motg->otg_wq, &motg->sm_work);
 
-	return 0;
+	writeb_relaxed(0x1, USB2_PHY_USB_PHY_IRQ_CMD);
+	/*
+	 * Databook says 200 usec delay is required for
+	 * clearing the interrupts.
+	 */
+	udelay(200);
+	writeb_relaxed(0x0, USB2_PHY_USB_PHY_IRQ_CMD);
+
+	val = readb_relaxed(USB2_PHY_USB_PHY_INTERRUPT_SRC_STATUS);
+	if (val & USB_PHY_IDDIG_1_0)
+		return false; /* ID is grounded */
+	else
+		return true;
 }
 
 static bool msm_otg_read_pmic_id_state(struct msm_otg *motg)

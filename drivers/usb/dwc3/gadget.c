@@ -759,6 +759,22 @@ static void dwc3_remove_requests(struct dwc3 *dwc, struct dwc3_ep *dep)
 
 		dwc3_gadget_giveback(dep, req, -ESHUTDOWN);
 	}
+
+	if (dep->number == 1 && dwc->ep0state != EP0_SETUP_PHASE) {
+		unsigned int dir;
+
+		dbg_log_string("CTRLPEND %d", dwc->ep0state);
+		dir = !!dwc->ep0_expect_in;
+		if (dwc->ep0state == EP0_DATA_PHASE)
+			dwc3_ep0_end_control_data(dwc, dwc->eps[dir]);
+		else
+			dwc3_ep0_end_control_data(dwc, dwc->eps[!dir]);
+
+		dwc->eps[0]->trb_enqueue = 0;
+		dwc->eps[1]->trb_enqueue = 0;
+	}
+
+	dbg_log_string("DONE for %s(%d)", dep->name, dep->number);
 }
 
 /**
@@ -1721,7 +1737,7 @@ static int __dwc3_gadget_wakeup(struct dwc3 *dwc)
 	u32			reg;
 
 	u8			link_state;
-	u8			speed;
+	unsigned long		flags;
 
 	/*
 	 * According to the Databook Remote wakeup request should
@@ -1744,12 +1760,28 @@ static int __dwc3_gadget_wakeup(struct dwc3 *dwc)
 	case DWC3_LINK_STATE_RX_DET:	/* in HS, means Early Suspend */
 	case DWC3_LINK_STATE_U3:	/* in HS, means SUSPEND */
 		break;
+	case DWC3_LINK_STATE_U1:
+		if (dwc->gadget.speed != USB_SPEED_SUPER) {
+			link_recover_only = true;
+			break;
+		}
+		/* Intentional fallthrough */
 	default:
 		dwc3_trace(trace_dwc3_gadget,
 				"can't wakeup from '%s'",
 				dwc3_gadget_link_string(link_state));
 		return -EINVAL;
 	}
+
+	/* Enable LINK STATUS change event */
+	reg = dwc3_readl(dwc->regs, DWC3_DEVTEN);
+	reg |= DWC3_DEVTEN_ULSTCNGEN;
+	dwc3_writel(dwc->regs, DWC3_DEVTEN, reg);
+	/*
+	 * memory barrier is required to make sure that required events
+	 * with core is enabled before performing RECOVERY mechnism.
+	 */
+	mb();
 
 	ret = dwc3_gadget_set_link_state(dwc, DWC3_LINK_STATE_RECOV);
 	if (ret < 0) {
@@ -1771,10 +1803,16 @@ static int __dwc3_gadget_wakeup(struct dwc3 *dwc)
 	while (retries--) {
 		reg = dwc3_readl(dwc->regs, DWC3_DSTS);
 
-		/* in HS, means ON */
-		if (DWC3_DSTS_USBLNKST(reg) == DWC3_LINK_STATE_U0)
-			break;
-	}
+	spin_lock_irqsave(&dwc->lock, flags);
+	/* Disable link status change event */
+	reg = dwc3_readl(dwc->regs, DWC3_DEVTEN);
+	reg &= ~DWC3_DEVTEN_ULSTCNGEN;
+	dwc3_writel(dwc->regs, DWC3_DEVTEN, reg);
+	/*
+	 * Complete this write before we go ahead and perform resume
+	 * as we don't need link status change notificaiton anymore.
+	 */
+	mb();
 
 	if (DWC3_DSTS_USBLNKST(reg) != DWC3_LINK_STATE_U0) {
 		dev_err(dwc->dev, "failed to send remote wakeup\n");
@@ -2054,11 +2092,22 @@ static int dwc3_gadget_run_stop(struct dwc3 *dwc, int is_on, int suspend)
 
 		if (dwc->has_hibernation && !suspend)
 			reg &= ~DWC3_DCTL_KEEP_CONNECT;
-
-		dwc->pullups_connected = false;
 	}
 
 	dwc3_writel(dwc->regs, DWC3_DCTL, reg);
+
+	/* Controller is not halted until the events are acknowledged */
+	if (!is_on) {
+		/*
+		 * Clear out any pending events (i.e. End Transfer Command
+		 * Complete).
+		 */
+		reg1 = dwc3_readl(dwc->regs, DWC3_GEVNTCOUNT(0));
+		reg1 &= DWC3_GEVNTCOUNT_MASK;
+		dbg_log_string("remaining EVNTCOUNT(0)=%d", reg1);
+		dwc3_writel(dwc->regs, DWC3_GEVNTCOUNT(0), reg1);
+		dwc3_notify_event(dwc, DWC3_GSI_EVT_BUF_CLEAR, 0);
+	}
 
 	do {
 		reg = dwc3_readl(dwc->regs, DWC3_DSTS);
@@ -2125,6 +2174,7 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 
 	ret = dwc3_gadget_run_stop(dwc, is_on, false);
 	spin_unlock_irqrestore(&dwc->lock, flags);
+	enable_irq(dwc->irq);
 
 	pm_runtime_mark_last_busy(dwc->dev);
 	pm_runtime_put_autosuspend(dwc->dev);
@@ -2768,6 +2818,25 @@ static int dwc3_cleanup_done_reqs(struct dwc3 *dwc, struct dwc3_ep *dep,
 	return 1;
 }
 
+static void dwc3_gsi_ep_transfer_complete(struct dwc3 *dwc, struct dwc3_ep *dep)
+{
+	struct usb_ep *ep = &dep->endpoint;
+	struct dwc3_trb *trb;
+	dma_addr_t offset;
+
+	trb = &dep->trb_pool[dep->trb_dequeue];
+	while (trb->ctrl & DWC3_TRBCTL_LINK_TRB) {
+		dwc3_ep_inc_trb(dep, &dep->trb_dequeue);
+		trb = &dep->trb_pool[dep->trb_dequeue];
+	}
+
+	if (!(trb->ctrl & DWC3_TRB_CTRL_HWO)) {
+		offset = dwc3_trb_dma_offset(dep, trb);
+		usb_gsi_ep_op(ep, (void *)&offset, GSI_EP_OP_UPDATE_DB);
+		dwc3_ep_inc_trb(dep, &dep->trb_dequeue);
+	}
+}
+
 static void dwc3_endpoint_transfer_complete(struct dwc3 *dwc,
 		struct dwc3_ep *dep, const struct dwc3_event_depevt *event)
 {
@@ -2779,6 +2848,15 @@ static void dwc3_endpoint_transfer_complete(struct dwc3 *dwc,
 
 	if (event->status & DEPEVT_STATUS_BUSERR)
 		status = -ECONNRESET;
+	/*
+	 * Check if NORMAL EP is used with GSI.
+	 * In that case dwc3 driver recevies EP events from hardware and
+	 * updates GSI doorbell with completed TRB.
+	 */
+	if (dep->endpoint.ep_type == EP_TYPE_GSI) {
+		dwc3_gsi_ep_transfer_complete(dwc, dep);
+		return;
+	}
 
 	clean_busy = dwc3_cleanup_done_reqs(dwc, dep, event, status);
 	if (clean_busy && (!dep->endpoint.desc || is_xfer_complete ||
@@ -3040,6 +3118,7 @@ static void dwc3_stop_active_transfers(struct dwc3 *dwc)
 {
 	u32 epnum;
 
+	dbg_log_string("START");
 	for (epnum = 2; epnum < DWC3_ENDPOINTS_NUM; epnum++) {
 		struct dwc3_ep *dep;
 
@@ -3050,8 +3129,12 @@ static void dwc3_stop_active_transfers(struct dwc3 *dwc)
 		if (!(dep->flags & DWC3_EP_ENABLED))
 			continue;
 
+		if (dep->endpoint.ep_type == EP_TYPE_GSI && dep->direction)
+			dwc3_notify_event(dwc,
+					DWC3_CONTROLLER_NOTIFY_CLEAR_DB, 0);
 		dwc3_remove_requests(dwc, dep);
 	}
+	dbg_log_string("DONE");
 }
 
 static void dwc3_clear_stall_all_ep(struct dwc3 *dwc)
@@ -3636,6 +3719,13 @@ static void dwc3_process_event_entry(struct dwc3 *dwc,
 	/* Endpoint IRQ, handle it and return early */
 	if (event->type.is_devspec == 0) {
 		/* depevt */
+		/* If remote-wakeup attempt by device had failed, then core
+		 * wouldn't give wakeup event after resume. Handle that
+		 * here on ep event which indicates that bus is resumed.
+		 */
+		if (dwc->b_suspend &&
+		    dwc3_get_link_state(dwc) == DWC3_LINK_STATE_U0)
+			dwc3_gadget_wakeup_interrupt(dwc, false);
 		return dwc3_endpoint_interrupt(dwc, &event->depevt);
 	}
 

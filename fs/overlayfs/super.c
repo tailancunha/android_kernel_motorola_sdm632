@@ -656,6 +656,11 @@ static int ovl_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return err;
 }
 
+static bool __read_mostly ovl_override_creds_def = true;
+module_param_named(override_creds, ovl_override_creds_def, bool, 0644);
+MODULE_PARM_DESC(ovl_override_creds_def,
+		 "Use mounter's credentials for accesses");
+
 /**
  * ovl_show_options
  *
@@ -738,6 +743,7 @@ static int ovl_parse_opt(char *opt, struct ovl_config *config)
 {
 	char *p;
 
+	config->override_creds = ovl_override_creds_def;
 	while ((p = ovl_next_opt(&opt)) != NULL) {
 		int token;
 		substring_t args[MAX_OPT_ARGS];
@@ -1354,6 +1360,7 @@ static int ovl_fill_super(struct super_block *sb, void *data, int silent)
 
 	sb->s_root = root_dentry;
 
+	sb->s_root = root_dentry;
 	return 0;
 
 out_free_oe:

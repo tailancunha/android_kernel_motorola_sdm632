@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/f2fs/inode.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
  *             http://www.samsung.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/fs.h>
 #include <linux/f2fs_fs.h>
@@ -36,15 +33,15 @@ void f2fs_set_inode_flags(struct inode *inode)
 	unsigned int flags = F2FS_I(inode)->i_flags;
 	unsigned int new_fl = 0;
 
-	if (flags & FS_SYNC_FL)
+	if (flags & F2FS_SYNC_FL)
 		new_fl |= S_SYNC;
-	if (flags & FS_APPEND_FL)
+	if (flags & F2FS_APPEND_FL)
 		new_fl |= S_APPEND;
-	if (flags & FS_IMMUTABLE_FL)
+	if (flags & F2FS_IMMUTABLE_FL)
 		new_fl |= S_IMMUTABLE;
-	if (flags & FS_NOATIME_FL)
+	if (flags & F2FS_NOATIME_FL)
 		new_fl |= S_NOATIME;
-	if (flags & FS_DIRSYNC_FL)
+	if (flags & F2FS_DIRSYNC_FL)
 		new_fl |= S_DIRSYNC;
 	if (f2fs_encrypted_inode(inode))
 		new_fl |= S_ENCRYPTED;
@@ -261,14 +258,10 @@ static int do_read_inode(struct inode *inode)
 	int err;
 
 	/* Check if ino is within scope */
-	if (check_nid_range(sbi, inode->i_ino)) {
-		f2fs_msg(inode->i_sb, KERN_ERR, "bad inode number: %lu",
-			 (unsigned long) inode->i_ino);
-		WARN_ON(1);
+	if (f2fs_check_nid_range(sbi, inode->i_ino))
 		return -EINVAL;
-	}
 
-	node_page = get_node_page(sbi, inode->i_ino);
+	node_page = f2fs_get_node_page(sbi, inode->i_ino);
 	if (IS_ERR(node_page))
 		return PTR_ERR(node_page);
 
@@ -294,6 +287,8 @@ static int do_read_inode(struct inode *inode)
 		fi->i_gc_failures = le16_to_cpu(ri->i_gc_failures);
 	fi->i_xattr_nid = le32_to_cpu(ri->i_xattr_nid);
 	fi->i_flags = le32_to_cpu(ri->i_flags);
+	if (S_ISREG(inode->i_mode))
+		fi->i_flags &= ~F2FS_PROJINHERIT_FL;
 	fi->flags = 0;
 	fi->i_advise = ri->i_advise;
 	fi->i_pino = le32_to_cpu(ri->i_pino);
@@ -331,6 +326,12 @@ static int do_read_inode(struct inode *inode)
 	/* check data exist */
 	if (f2fs_has_inline_data(inode) && !f2fs_exist_data(inode))
 		__recover_inline_status(inode, node_page);
+
+	/* try to recover cold bit for non-dir inode */
+	if (!S_ISDIR(inode->i_mode) && !is_cold_node(node_page)) {
+		set_cold_node(node_page, false);
+		set_page_dirty(node_page);
+	}
 
 	/* get rdev by using inline_info */
 	__get_inode_rdev(inode, ri);
@@ -398,10 +399,10 @@ struct inode *f2fs_iget(struct super_block *sb, unsigned long ino)
 make_now:
 	if (ino == F2FS_NODE_INO(sbi)) {
 		inode->i_mapping->a_ops = &f2fs_node_aops;
-		mapping_set_gfp_mask(inode->i_mapping, GFP_F2FS_ZERO);
+		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
 	} else if (ino == F2FS_META_INO(sbi)) {
 		inode->i_mapping->a_ops = &f2fs_meta_aops;
-		mapping_set_gfp_mask(inode->i_mapping, GFP_F2FS_ZERO);
+		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
 	} else if (S_ISREG(inode->i_mode)) {
 		inode->i_op = &f2fs_file_inode_operations;
 		inode->i_fop = &f2fs_file_operations;
@@ -537,12 +538,12 @@ void update_inode(struct inode *inode, struct page *node_page)
 	F2FS_I(inode)->i_disk_time[3] = F2FS_I(inode)->i_crtime;
 }
 
-void update_inode_page(struct inode *inode)
+void f2fs_update_inode_page(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct page *node_page;
 retry:
-	node_page = get_node_page(sbi, inode->i_ino);
+	node_page = f2fs_get_node_page(sbi, inode->i_ino);
 	if (IS_ERR(node_page)) {
 		int err = PTR_ERR(node_page);
 		if (err == -ENOMEM) {
@@ -553,7 +554,7 @@ retry:
 		}
 		return;
 	}
-	update_inode(inode, node_page);
+	f2fs_update_inode(inode, node_page);
 	f2fs_put_page(node_page, 1);
 }
 
@@ -567,6 +568,9 @@ int f2fs_write_inode(struct inode *inode, struct writeback_control *wbc)
 
 	if (!is_inode_flag_set(inode, FI_DIRTY_INODE))
 		return 0;
+
+	if (f2fs_is_checkpoint_ready(sbi))
+		return -ENOSPC;
 
 	/*
 	 * We need to balance fs here to prevent from producing dirty node pages
@@ -680,7 +684,7 @@ out_clear:
 }
 
 /* caller should call f2fs_lock_op() */
-void handle_failed_inode(struct inode *inode)
+void f2fs_handle_failed_inode(struct inode *inode)
 {
 	struct f2fs_sb_info *sbi = F2FS_I_SB(inode);
 	struct node_info ni;

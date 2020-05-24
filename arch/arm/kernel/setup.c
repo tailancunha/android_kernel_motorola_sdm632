@@ -721,7 +721,7 @@ static void __init smp_build_mpidr_hash(void)
  */
 struct proc_info_list *lookup_processor(u32 midr)
 {
-	struct proc_info_list *list;
+	struct proc_info_list *list = lookup_processor_type(midr);
 
 	arm_init_bp_hardening();
 	list = lookup_processor_type(midr);

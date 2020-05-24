@@ -307,6 +307,7 @@ enum xfrm_attr_type_t {
 	XFRMA_OUTPUT_MARK,	/* __u32 */
 	__XFRMA_MAX
 
+#define XFRMA_OUTPUT_MARK XFRMA_SET_MARK	/* Compatibility */
 #define XFRMA_MAX (__XFRMA_MAX - 1)
 };
 

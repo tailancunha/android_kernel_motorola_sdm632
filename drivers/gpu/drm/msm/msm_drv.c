@@ -1000,7 +1000,50 @@ static void msm_irq_preinstall(struct drm_device *dev)
 	kms->funcs->irq_preinstall(kms);
 }
 
-static int msm_irq_postinstall(struct drm_device *dev)
+	/* check for splash status before triggering cleanup
+	 * if we end up here with splash status ON i.e before first
+	 * commit then ignore the last close call
+	 */
+	if (kms && kms->funcs && kms->funcs->check_for_splash
+		&& kms->funcs->check_for_splash(kms))
+		return;
+
+	/*
+	 * clean up vblank disable immediately as this is the last close.
+	 */
+	for (i = 0; i < dev->num_crtcs; i++) {
+		struct drm_vblank_crtc *vblank = &dev->vblank[i];
+		struct timer_list *disable_timer = &vblank->disable_timer;
+
+		if (del_timer_sync(disable_timer))
+			disable_timer->function(disable_timer->data);
+	}
+
+	/* wait for pending vblank requests to be executed by worker thread */
+	flush_workqueue(priv->wq);
+
+	if (priv->fbdev) {
+		drm_fb_helper_restore_fbdev_mode_unlocked(priv->fbdev);
+	} else {
+		drm_modeset_lock_all(dev);
+		msm_disable_all_modes(dev);
+		if (kms && kms->funcs && kms->funcs->lastclose)
+			kms->funcs->lastclose(kms);
+		drm_modeset_unlock_all(dev);
+	}
+}
+
+static irqreturn_t msm_irq(int irq, void *arg)
+{
+	struct drm_device *dev = arg;
+	struct msm_drm_private *priv = dev->dev_private;
+	struct msm_kms *kms = priv->kms;
+
+	BUG_ON(!kms);
+	return kms->funcs->irq(kms);
+}
+
+static void msm_irq_preinstall(struct drm_device *dev)
 {
 	struct msm_drm_private *priv = dev->dev_private;
 	struct msm_kms *kms = priv->kms;

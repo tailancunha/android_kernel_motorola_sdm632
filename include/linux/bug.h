@@ -25,6 +25,14 @@ struct pt_regs;
 			BUG_ON(cond);                   \
 	} while (0)
 
+#define MAYBE_BUILD_BUG_ON(cond)			\
+	do {						\
+		if (__builtin_constant_p((cond)))       \
+			BUILD_BUG_ON(cond);             \
+		else                                    \
+			BUG_ON(cond);                   \
+	} while (0)
+
 #endif	/* __CHECKER__ */
 
 #ifdef CONFIG_GENERIC_BUG

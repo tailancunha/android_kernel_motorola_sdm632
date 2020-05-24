@@ -105,6 +105,7 @@ struct cpufreq_cooling_device {
 	unsigned int max_level;
 	unsigned int *freq_table;	/* In descending order */
 	struct cpumask allowed_cpus;
+	struct cpufreq_policy *policy;
 	struct list_head node;
 	u32 last_load;
 	u64 *time_in_idle;
@@ -717,6 +718,7 @@ static int cpufreq_set_cur_state(struct thermal_cooling_device *cdev,
 {
 	struct cpufreq_cooling_device *cpufreq_device = cdev->devdata;
 	unsigned int cpu = cpumask_any(&cpufreq_device->allowed_cpus);
+	struct cpumask policy_online_cpus;
 	unsigned int clip_freq;
 	unsigned long prev_state;
 	struct device *cpu_dev;

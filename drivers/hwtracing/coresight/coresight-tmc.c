@@ -351,6 +351,7 @@ static ssize_t trigger_cntr_show(struct device *dev,
 
 	return sprintf(buf, "%#lx\n", val);
 }
+static DEVICE_ATTR_RW(trigger_cntr);
 
 static ssize_t trigger_cntr_store(struct device *dev,
 			     struct device_attribute *attr,

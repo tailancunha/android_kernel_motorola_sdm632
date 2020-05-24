@@ -830,6 +830,20 @@ static void flush_echoes(struct tty_struct *tty)
 	mutex_unlock(&ldata->output_lock);
 }
 
+#if defined(CONFIG_TTY_FLUSH_LOCAL_ECHO)
+static void continue_process_echoes(struct work_struct *work)
+{
+	struct tty_struct *tty =
+		container_of(work, struct tty_struct, echo_delayed_work.work);
+	struct n_tty_data *ldata = tty->disc_data;
+
+	mutex_lock(&ldata->output_lock);
+	tty->delayed_work = 0;
+	__process_echoes(tty);
+	mutex_unlock(&ldata->output_lock);
+}
+#endif
+
 /**
  *	add_echo_byte	-	add a byte to the echo buffer
  *	@c: unicode byte to echo

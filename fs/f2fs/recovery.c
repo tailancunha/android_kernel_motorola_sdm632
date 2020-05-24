@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/f2fs/recovery.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
  *             http://www.samsung.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/fs.h>
 #include <linux/f2fs_fs.h>
@@ -47,7 +44,7 @@
 
 static struct kmem_cache *fsync_entry_slab;
 
-bool space_for_roll_forward(struct f2fs_sb_info *sbi)
+bool f2fs_space_for_roll_forward(struct f2fs_sb_info *sbi)
 {
 	s64 nalloc = percpu_counter_sum_positive(&sbi->alloc_valid_block_count);
 
@@ -265,6 +262,7 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 
 		if (!is_recoverable_dnode(page))
 			break;
+		}
 
 		if (!is_fsync_dnode(page))
 			goto next;
@@ -293,6 +291,7 @@ static int find_fsync_dnodes(struct f2fs_sb_info *sbi, struct list_head *head,
 					err = 0;
 					goto next;
 				}
+				f2fs_put_page(page, 1);
 				break;
 			}
 		}
@@ -316,13 +315,12 @@ next:
 		blkaddr = next_blkaddr_of_node(page);
 		f2fs_put_page(page, 1);
 
-		ra_meta_pages_cond(sbi, blkaddr);
+		f2fs_ra_meta_pages_cond(sbi, blkaddr);
 	}
-	f2fs_put_page(page, 1);
 	return err;
 }
 
-static void destroy_fsync_dnodes(struct list_head *head)
+static void destroy_fsync_dnodes(struct list_head *head, int drop)
 {
 	struct fsync_inode_entry *entry, *tmp;
 
@@ -359,7 +357,9 @@ static int check_index_in_prev_nodes(struct f2fs_sb_info *sbi,
 		}
 	}
 
-	sum_page = get_sum_page(sbi, segno);
+	sum_page = f2fs_get_sum_page(sbi, segno);
+	if (IS_ERR(sum_page))
+		return PTR_ERR(sum_page);
 	sum_node = (struct f2fs_summary_block *)page_address(sum_page);
 	sum = sum_node->entries[blkoff];
 	f2fs_put_page(sum_page, 1);
@@ -379,7 +379,7 @@ got_it:
 	}
 
 	/* Get the node page */
-	node_page = get_node_page(sbi, nid);
+	node_page = f2fs_get_node_page(sbi, nid);
 	if (IS_ERR(node_page))
 		return PTR_ERR(node_page);
 
@@ -414,11 +414,11 @@ got_it:
 		unlock_page(dn->inode_page);
 
 	set_new_dnode(&tdn, inode, NULL, NULL, 0);
-	if (get_dnode_of_data(&tdn, bidx, LOOKUP_NODE))
+	if (f2fs_get_dnode_of_data(&tdn, bidx, LOOKUP_NODE))
 		goto out;
 
 	if (tdn.data_blkaddr == blkaddr)
-		truncate_data_blocks_range(&tdn, 1);
+		f2fs_truncate_data_blocks_range(&tdn, 1);
 
 	f2fs_put_dnode(&tdn);
 out:
@@ -447,7 +447,7 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 
 	/* step 1: recover xattr */
 	if (IS_INODE(page)) {
-		recover_inline_xattr(inode, page);
+		f2fs_recover_inline_xattr(inode, page);
 	} else if (f2fs_has_xattr_block(ofs_of_node(page))) {
 		err = recover_xattr_data(inode, page);
 		if (!err)
@@ -456,7 +456,7 @@ static int do_recover_data(struct f2fs_sb_info *sbi, struct inode *inode,
 	}
 
 	/* step 2: recover inline data */
-	if (recover_inline_data(inode, page))
+	if (f2fs_recover_inline_data(inode, page))
 		goto out;
 
 	/* step 3: recover data indices */
@@ -476,7 +476,6 @@ retry_dn:
 
 	f2fs_wait_on_page_writeback(dn.node_page, NODE, true);
 
-	get_node_info(sbi, dn.nid, &ni);
 	f2fs_bug_on(sbi, ni.ino != ino_of_node(page));
 
 	if (ofs_of_node(dn.node_page) != ofs_of_node(page)) {
@@ -584,7 +583,7 @@ static int recover_data(struct f2fs_sb_info *sbi, struct list_head *inode_list,
 		if (!f2fs_is_valid_blkaddr(sbi, blkaddr, META_POR))
 			break;
 
-		ra_meta_pages_cond(sbi, blkaddr);
+		f2fs_ra_meta_pages_cond(sbi, blkaddr);
 
 		page = get_tmp_page(sbi, blkaddr);
 
@@ -624,7 +623,7 @@ next:
 		f2fs_put_page(page, 1);
 	}
 	if (!err)
-		allocate_new_segments(sbi);
+		f2fs_allocate_new_segments(sbi);
 	return err;
 }
 
@@ -691,7 +690,10 @@ skip:
 	if (err) {
 		truncate_inode_pages_final(NODE_MAPPING(sbi));
 		truncate_inode_pages_final(META_MAPPING(sbi));
+	} else {
+		clear_sbi_flag(sbi, SBI_POR_DOING);
 	}
+	mutex_unlock(&sbi->cp_mutex);
 
 	clear_sbi_flag(sbi, SBI_POR_DOING);
 	mutex_unlock(&sbi->cp_mutex);

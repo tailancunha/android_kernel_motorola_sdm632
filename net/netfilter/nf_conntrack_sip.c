@@ -2051,6 +2051,10 @@ static int sip_help_udp(struct sk_buff *skb, unsigned int protoff,
 	if (datalen < strlen("SIP/2.0 200"))
 		return NF_ACCEPT;
 
+	/* Check if the header contains SIP version */
+	if (!strnstr(dptr, "SIP/2.0", datalen))
+		return NF_ACCEPT;
+
 	return process_sip_msg(skb, ct, protoff, dataoff, &dptr, &datalen);
 }
 

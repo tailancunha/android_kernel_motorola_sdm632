@@ -8,6 +8,7 @@
 #include <linux/kasan-checks.h>
 #include <linux/thread_info.h>
 #include <linux/string.h>
+#include <linux/sched.h>
 #include <asm/asm.h>
 #include <asm/page.h>
 #include <asm/smap.h>

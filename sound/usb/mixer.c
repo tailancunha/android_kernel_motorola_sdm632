@@ -839,6 +839,43 @@ static int __check_input_term(struct mixer_build *state, int id,
 			}
 			return 0;
 		}
+		/* UAC3_MIXER_UNIT_V3 */
+		case UAC2_CLOCK_SELECTOR:
+		/* UAC3_CLOCK_SOURCE */ {
+			if (state->mixer->protocol == UAC_VERSION_3
+				&& hdr[2] == UAC3_CLOCK_SOURCE) {
+				struct uac3_clock_source_descriptor *d = p1;
+
+				term->type = d->bDescriptorSubtype << 16;
+				term->id = id;
+				term->name = d->wClockSourceStr;
+			} else if (state->mixer->protocol == UAC_VERSION_3
+					&& hdr[2] == UAC3_MIXER_UNIT_V3) {
+				struct uac3_mixer_unit_descriptor *d = p1;
+
+				term->type = d->bDescriptorSubtype << 16;
+				if (d->wClusterDescrID == CLUSTER_ID_MONO) {
+					term->channels = NUM_CHANNELS_MONO;
+					term->chconfig = BADD_CH_CONFIG_MONO;
+				} else {
+					term->channels = NUM_CHANNELS_STEREO;
+					term->chconfig = BADD_CH_CONFIG_STEREO;
+				}
+				term->name = d->wMixerDescrStr;
+			} else {
+				struct uac_selector_unit_descriptor *d = p1;
+				/* call recursively to retrieve channel info */
+				err = __check_input_term(state,
+							d->baSourceID[0], term);
+				if (err < 0)
+					return err;
+				/* virtual type */
+				term->type = d->bDescriptorSubtype << 16;
+				term->id = id;
+				term->name = uac_selector_unit_iSelector(d);
+			}
+			return 0;
+		}
 		case UAC1_PROCESSING_UNIT:
 		case UAC1_EXTENSION_UNIT:
 		/* UAC2_PROCESSING_UNIT_V2 */

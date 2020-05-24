@@ -1898,6 +1898,8 @@ int wil6210_debugfs_init(struct wil6210_priv *wil)
 
 void wil6210_debugfs_remove(struct wil6210_priv *wil)
 {
+	int i;
+
 	debugfs_remove_recursive(wil->debug);
 	wil->debug = NULL;
 

@@ -1,12 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0
 /*
  * fs/f2fs/data.c
  *
  * Copyright (c) 2012 Samsung Electronics Co., Ltd.
  *             http://www.samsung.com/
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
  */
 #include <linux/fs.h>
 #include <linux/f2fs_fs.h>
@@ -17,6 +14,7 @@
 #include <linux/pagevec.h>
 #include <linux/blkdev.h>
 #include <linux/bio.h>
+#include <linux/swap.h>
 #include <linux/prefetch.h>
 #include <linux/uio.h>
 #include <linux/cleancache.h>
@@ -82,6 +80,7 @@ static void __read_end_io(struct bio *bio)
 		} else {
 			SetPageUptodate(page);
 		}
+		dec_page_count(F2FS_P_SB(page), __read_io_type(page));
 		unlock_page(page);
 	}
 	if (bio->bi_private)
@@ -147,6 +146,11 @@ static void f2fs_write_end_io(struct bio *bio)
 	struct f2fs_sb_info *sbi = bio->bi_private;
 	struct bio_vec *bvec;
 	int i;
+
+	if (time_to_inject(sbi, FAULT_WRITE_IO)) {
+		f2fs_show_injection_info(FAULT_WRITE_IO);
+		bio->bi_error = -EIO;
+	}
 
 	bio_for_each_segment_all(bvec, bio, i) {
 		struct page *page = bvec->bv_page;
@@ -809,8 +813,6 @@ struct page *find_data_page(struct inode *inode, pgoff_t index)
 		f2fs_put_page(page, 0);
 		return ERR_PTR(-EIO);
 	}
-	return page;
-}
 
 /*
  * If it tries to access a hole, return an error.
@@ -852,10 +854,12 @@ repeat:
 struct page *get_new_data_page(struct inode *inode,
 		struct page *ipage, pgoff_t index, bool new_i_size)
 {
-	struct address_space *mapping = inode->i_mapping;
-	struct page *page;
-	struct dnode_of_data dn;
-	int err;
+	struct buffer_head map_bh;
+	sector_t start_blk, last_blk;
+	pgoff_t next_pgofs;
+	u64 logical = 0, phys = 0, size = 0;
+	u32 flags = 0;
+	int ret = 0;
 
 	page = f2fs_grab_cache_page(mapping, index, true);
 	if (!page) {
@@ -1184,6 +1188,8 @@ skip:
 				start_pgofs, map->m_pblk + ofs,
 				map->m_len - ofs);
 		}
+		if (bio_encrypted)
+			fscrypt_set_ice_dun(inode, bio, dun);
 	}
 
 	f2fs_put_dnode(&dn);
@@ -1605,7 +1611,7 @@ next_page:
 
 static int f2fs_read_data_page(struct file *file, struct page *page)
 {
-	struct inode *inode = page->mapping->host;
+	struct inode *inode = page_file_mapping(page)->host;
 	int ret = -EAGAIN;
 
 	trace_f2fs_readpage(page, DATA);
@@ -1775,6 +1781,14 @@ int do_write_data_page(struct f2fs_io_info *fio)
 	/* This page is already truncated */
 	if (fio->old_blkaddr == NULL_ADDR) {
 		ClearPageUptodate(page);
+		clear_cold_data(page);
+		goto out_writepage;
+	}
+got_it:
+	if (__is_valid_data_blkaddr(fio->old_blkaddr) &&
+		!f2fs_is_valid_blkaddr(fio->sbi, fio->old_blkaddr,
+						DATA_GENERIC_ENHANCE)) {
+		err = -EFSCORRUPTED;
 		goto out_writepage;
 	}
 got_it:
@@ -1938,7 +1952,7 @@ done:
 
 out:
 	inode_dec_dirty_pages(inode);
-	if (err)
+	if (err) {
 		ClearPageUptodate(page);
 
 	if (wbc->for_reclaim) {
@@ -2442,15 +2456,61 @@ unlock_out:
 static int check_direct_IO(struct inode *inode, struct iov_iter *iter,
 			   loff_t offset)
 {
-	unsigned blocksize_mask = inode->i_sb->s_blocksize - 1;
+	unsigned i_blkbits = READ_ONCE(inode->i_blkbits);
+	unsigned blkbits = i_blkbits;
+	unsigned blocksize_mask = (1 << blkbits) - 1;
+	unsigned long align = offset | iov_iter_alignment(iter);
+	struct block_device *bdev = inode->i_sb->s_bdev;
+
+	if (align & blocksize_mask) {
+		if (bdev)
+			blkbits = blksize_bits(bdev_logical_block_size(bdev));
+		blocksize_mask = (1 << blkbits) - 1;
+		if (align & blocksize_mask)
+			return -EINVAL;
+		return 1;
+	}
+	return 0;
+}
 
 	if (offset & blocksize_mask)
 		return -EINVAL;
 
-	if (iov_iter_alignment(iter) & blocksize_mask)
-		return -EINVAL;
+	bio->bi_private = dio->orig_private;
+	bio->bi_end_io = dio->orig_end_io;
 
-	return 0;
+	kvfree(dio);
+
+	bio_endio(bio);
+}
+
+static void f2fs_dio_submit_bio(struct bio *bio, struct inode *inode,
+							loff_t file_offset)
+{
+	struct f2fs_private_dio *dio;
+	bool write = (bio_op(bio) == REQ_OP_WRITE);
+
+	dio = f2fs_kzalloc(F2FS_I_SB(inode),
+			sizeof(struct f2fs_private_dio), GFP_NOFS);
+	if (!dio)
+		goto out;
+
+	dio->inode = inode;
+	dio->orig_end_io = bio->bi_end_io;
+	dio->orig_private = bio->bi_private;
+	dio->write = write;
+
+	bio->bi_end_io = f2fs_dio_end_io;
+	bio->bi_private = dio;
+
+	inc_page_count(F2FS_I_SB(inode),
+			write ? F2FS_DIO_WRITE : F2FS_DIO_READ);
+
+	submit_bio(bio);
+	return;
+out:
+	bio->bi_error = -EIO;
+	bio_endio(bio);
 }
 
 static ssize_t f2fs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
@@ -2581,8 +2641,7 @@ int f2fs_release_page(struct page *page, gfp_t wait)
 
 static int f2fs_set_data_page_dirty(struct page *page)
 {
-	struct address_space *mapping = page->mapping;
-	struct inode *inode = mapping->host;
+	struct inode *inode = page_file_mapping(page)->host;
 
 	trace_f2fs_set_page_dirty(page, DATA);
 
@@ -2603,7 +2662,7 @@ static int f2fs_set_data_page_dirty(struct page *page)
 
 	if (!PageDirty(page)) {
 		__set_page_dirty_nobuffers(page);
-		update_dirty_page(inode, page);
+		f2fs_update_dirty_page(inode, page);
 		return 1;
 	}
 	return 0;
@@ -2622,6 +2681,7 @@ static sector_t f2fs_bmap(struct address_space *mapping, sector_t block)
 
 	return generic_block_bmap(mapping, block, get_data_block_bmap);
 }
+#endif
 
 #ifdef CONFIG_MIGRATION
 #include <linux/migrate.h>

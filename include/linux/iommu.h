@@ -119,6 +119,11 @@ enum iommu_cap {
  * DOMAIN_ATTR_FSL_PAMUV1 corresponds to the above mentioned contraints.
  * The caller can invoke iommu_domain_get_attr to check if the underlying
  * iommu implementation supports these constraints.
+ *
+ * DOMAIN_ATTR_NO_CFRE
+ * Some bus implementations may enter a bad state if iommu reports an error
+ * on context fault. As context faults are not always fatal, this must be
+ * avoided.
  */
 
 enum iommu_attr {

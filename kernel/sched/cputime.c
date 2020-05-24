@@ -303,6 +303,7 @@ static inline cputime_t account_other_time(cputime_t max)
 
 	return accounted;
 }
+#endif
 
 #ifdef CONFIG_64BIT
 static inline u64 read_sum_exec_runtime(struct task_struct *t)

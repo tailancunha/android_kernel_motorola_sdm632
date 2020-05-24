@@ -29,7 +29,7 @@
 #define MAX_DIGEST_SIZE		64
 #define MAX_TAP			8
 
-#define MAX_KEYLEN		160
+#define MAX_KEYLEN		1088
 #define MAX_IVLEN		32
 
 struct hash_testvec {
@@ -37,10 +37,10 @@ struct hash_testvec {
 	char *key;
 	char *plaintext;
 	char *digest;
-	unsigned char tap[MAX_TAP];
+	unsigned short tap[MAX_TAP];
 	unsigned short psize;
-	unsigned char np;
-	unsigned char ksize;
+	unsigned short np;
+	unsigned short ksize;
 };
 
 /*
